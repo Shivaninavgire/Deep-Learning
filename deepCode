@@ -1,0 +1,252 @@
+# Requires: tensorflow (2.x), sklearn, matplotlib, numpy
+import numpy as np
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers, models, Input, Model
+from tensorflow.keras.utils import to_categorical
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from sklearn.model_selection import train_test_split
+import matplotlib.pyplot as plt
+
+# 1) Sequential MLP for MNIST
+def build_mlp_mnist():
+    model = keras.Sequential([
+        layers.Flatten(input_shape=(28,28)),
+        layers.Dense(128, activation='relu'),
+        layers.Dropout(0.3),
+        layers.Dense(10, activation='softmax')
+    ])
+    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+    return model
+
+# 2) Simple CNN for grayscale 28x28x1
+def build_cnn_28x28():
+    model = keras.Sequential([
+        layers.Conv2D(32, (3,3), activation='relu', input_shape=(28,28,1)),
+        layers.MaxPooling2D((2,2)),
+        layers.Conv2D(64, (3,3), activation='relu'),
+        layers.Flatten(),
+        layers.Dense(128, activation='relu'),
+        layers.Dense(10, activation='softmax')
+    ])
+    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+    return model
+
+# 3) Add Dense(64) before output of a pre-trained Sequential model and compile
+def add_dense_before_output(pretrained_model):
+    # assume pretrained_model is Sequential and last layer is output
+    x = pretrained_model.layers[-2].output if len(pretrained_model.layers) >= 2 else pretrained_model.output
+    # Easiest: rebuild: take inputs -> all layers except last -> add new -> last
+    inp = pretrained_model.input
+    # apply all but last layer
+    y = inp
+    for layer in pretrained_model.layers[:-1]:
+        y = layer(y)
+    y = layers.Dense(64, activation='relu')(y)
+    # assume original output had 10 units; adapt if necessary
+    out = layers.Dense(pretrained_model.layers[-1].output_shape[-1], activation=pretrained_model.layers[-1].activation)(y)
+    new_model = Model(inputs=inp, outputs=out)
+    new_model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+    return new_model
+
+# 4) Sigmoid vs Softmax comments + 3-class example
+# - Sigmoid: independent probability for each output neuron (good for multi-label).
+# - Softmax: outputs sum to 1 across neurons, gives a single categorical distribution (good for mutually exclusive classes).
+def example_sigmoid_vs_softmax():
+    # 3-class single-label -> use softmax
+    model_softmax = keras.Sequential([
+        layers.Input((32,)),
+        layers.Dense(16, activation='relu'),
+        layers.Dense(3, activation='softmax')   # softmax for mutually-exclusive 3 classes
+    ])
+    model_softmax.compile(optimizer='adam', loss='categorical_crossentropy')
+
+    # 3-class multi-label -> use sigmoid (each class independent)
+    model_sigmoid = keras.Sequential([
+        layers.Input((32,)),
+        layers.Dense(16, activation='relu'),
+        layers.Dense(3, activation='sigmoid')   # sigmoid for independent multi-label outputs
+    ])
+    model_sigmoid.compile(optimizer='adam', loss='binary_crossentropy')
+    return model_softmax, model_sigmoid
+
+# 5) Functional API: two inputs concatenated -> Dense(64) -> single sigmoid output
+def build_two_input_model():
+    in1 = Input(shape=(32,), name='input1')
+    in2 = Input(shape=(32,), name='input2')
+    x = layers.Concatenate()([in1, in2])
+    x = layers.Dense(64, activation='relu')(x)
+    out = layers.Dense(1, activation='sigmoid')(x)
+    model = Model(inputs=[in1, in2], outputs=out)
+    model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+    return model
+
+# 6) Load CIFAR-10, normalize, one-hot encode labels
+def load_prepare_cifar10():
+    (x_train, y_train), (x_test, y_test) = keras.datasets.cifar10.load_data()
+    x_train = x_train.astype('float32') / 255.0
+    x_test  = x_test.astype('float32') / 255.0
+    y_train = to_categorical(y_train, 10)
+    y_test  = to_categorical(y_test, 10)
+    return (x_train, y_train), (x_test, y_test)
+
+# 7) Reshape X with shape (1000,28,28) for CNN input
+def reshape_for_cnn(X):
+    # If grayscale CNN expects (n,28,28,1)
+    if X.ndim == 3:
+        return X.reshape((-1, 28, 28, 1))
+    return X
+
+# 8) Split dataset into 70% train, 15% val, 15% test using sklearn
+def split_70_15_15(X, y, random_state=42, stratify=None):
+    X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.30, random_state=random_state, stratify=stratify)
+    # split temp 50/50 -> 15% each of original
+    X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5, random_state=random_state, stratify=None if stratify is None else train_test_split(stratify, test_size=0.30, random_state=random_state)[1])
+    return X_train, X_val, X_test, y_train, y_val, y_test
+
+# 9) Data augmentation with ImageDataGenerator
+def get_datagen():
+    datagen = ImageDataGenerator(
+        rotation_range=15,
+        width_shift_range=0.1,
+        height_shift_range=0.1,
+        horizontal_flip=True
+    )
+    return datagen
+
+# 10) Visualize 5 random images from dataset with labels
+def show_random_images(X, y, class_names=None, n=5):
+    idx = np.random.choice(len(X), n, replace=False)
+    plt.figure(figsize=(12,3))
+    for i, j in enumerate(idx):
+        plt.subplot(1,n,i+1)
+        img = X[j]
+        if img.shape[-1] == 1: plt.imshow(img.squeeze(), cmap='gray')
+        else: plt.imshow(img)
+        title = str(np.argmax(y[j])) if y.ndim>1 else str(y[j])
+        if class_names:
+            title = class_names[int(title)]
+        plt.title(title); plt.axis('off')
+    plt.show()
+
+# 11) Train Sequential model for 10 epochs with EarlyStopping (patience=3)
+def train_with_earlystop(model, X_train, y_train, X_val, y_val, batch_size=32):
+    early = keras.callbacks.EarlyStopping(monitor='val_loss', patience=3, restore_best_weights=True)
+    history = model.fit(X_train, y_train, validation_data=(X_val, y_val), epochs=10, batch_size=batch_size, callbacks=[early])
+    return history
+
+# 12) ModelCheckpoint saving best model by val_accuracy
+def get_checkpoint_callback(filepath='best_model.h5'):
+    checkpoint = keras.callbacks.ModelCheckpoint(filepath, monitor='val_accuracy', save_best_only=True, mode='max')
+    return checkpoint
+
+# 13) Plot training & validation loss; identify overfitting
+def plot_loss(history):
+    loss = history.history['loss']; val_loss = history.history['val_loss']
+    epochs = range(1, len(loss)+1)
+    plt.plot(epochs, loss, label='train_loss')
+    plt.plot(epochs, val_loss, label='val_loss')
+    plt.xlabel('Epoch'); plt.ylabel('Loss'); plt.legend(); plt.show()
+    # Overfitting sign: train loss goes down while val loss flattens or goes up.
+
+# 14) Evaluate on test data and print loss & accuracy
+def evaluate_model(model, X_test, y_test):
+    loss, acc = model.evaluate(X_test, y_test, verbose=0)
+    print(f'Test loss: {loss:.4f}, Test accuracy: {acc:.4f}')
+    return loss, acc
+
+# 15) Detect overfitting given arrays and explanation
+def detect_overfitting(train_loss, val_loss):
+    # simple heuristic: if train_loss decreases while val_loss increases in last epoch -> overfitting
+    train_dec = all(x>=y for x,y in zip(train_loss, train_loss[1:]))  # decreasing True
+    val_increase = val_loss[-1] > min(val_loss)
+    print("train_loss:", train_loss)
+    print("val_loss:", val_loss)
+    if train_dec and val_increase:
+        print("Likely overfitting: training loss decreasing while validation loss has started increasing.")
+    else:
+        print("No strong overfitting signal by this heuristic.")
+    # For given arrays:
+    # train_loss = [0.8,0.5,0.3,0.2] is decreasing; val_loss = [0.9,0.6,0.4,0.5] val starts increasing at end -> overfitting.
+
+# 16) Freeze all layers except last Dense layer in a pre-trained CNN, then compile for fine-tuning
+def freeze_all_but_last_dense(model):
+    # assume model.layers[-1] is last Dense; set others non-trainable
+    for layer in model.layers[:-1]:
+        layer.trainable = False
+    model.compile(optimizer=keras.optimizers.Adam(1e-4), loss='categorical_crossentropy', metrics=['accuracy'])
+    return model
+
+# 17) Extract output of an intermediate layer (second Dense) for single input using Functional API
+def extract_intermediate_output(model, layer_name_or_index, sample_input):
+    # model: a Keras Model; layer_name_or_index: name or index of layer to extract
+    if isinstance(layer_name_or_index, int):
+        layer = model.layers[layer_name_or_index]
+    else:
+        layer = model.get_layer(layer_name_or_index)
+    intermediate_model = Model(inputs=model.input, outputs=layer.output)
+    return intermediate_model.predict(np.expand_dims(sample_input, axis=0))
+
+# 18) Custom MSE loss and compile a model with it
+def custom_mse_loss(y_true, y_pred):
+    return tf.reduce_mean(tf.square(y_true - y_pred))
+def compile_with_custom_mse(model):
+    model.compile(optimizer='adam', loss=custom_mse_loss)
+    return model
+
+# 19) Save model to HDF5 and SavedModel, then load back
+def save_and_load_model_example(model):
+    model.save('model.h5')                 # HDF5
+    model.save('saved_model_dir')          # SavedModel format
+    loaded_h5 = keras.models.load_model('model.h5', compile=False)
+    loaded_saved = keras.models.load_model('saved_model_dir', compile=False)
+    return loaded_h5, loaded_saved
+
+# 20) Manual softmax with numpy and compare with tf softmax
+def compare_softmax(logits):
+    logits = np.array(logits, dtype=np.float64)
+    exps = np.exp(logits - np.max(logits))   # numeric stability
+    manual = exps / np.sum(exps)
+    tf_soft = tf.nn.softmax(logits).numpy()
+    return manual, tf_soft
+
+# --- Example quick usage flow for some items ---
+if _name_ == "_main_":
+    # Build and show models
+    mlp = build_mlp_mnist()
+    cnn = build_cnn_28x28()
+    print("MLP summary:")
+    mlp.summary()
+    print("CNN summary:")
+    cnn.summary()
+
+    # Load CIFAR-10 (item 6)
+    (x_tr, y_tr), (x_te, y_te) = load_prepare_cifar10()
+
+    # Data augmentation (item 9)
+    datagen = get_datagen()
+    datagen.fit(x_tr[:100])  # just fit a small subset if using featurewise_center etc (not necessary here)
+
+    # Split CIFAR10 to 70/15/15 (item 8)
+    X_train, X_val, X_test, Y_train, Y_val, Y_test = split_70_15_15(x_tr, y_tr, stratify=np.argmax(y_tr, axis=1))
+
+    # Visualize 5 random images (item 10)
+    show_random_images(X_train, Y_train, n=5)
+
+    # Example training with EarlyStopping & ModelCheckpoint (items 11 & 12)
+    small_model = keras.Sequential([layers.Input(x_tr.shape[1:]), layers.Flatten(), layers.Dense(64, activation='relu'), layers.Dense(10, activation='softmax')])
+    small_model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+    checkpoint = get_checkpoint_callback('best_by_valacc.h5')
+    early = keras.callbacks.EarlyStopping(monitor='val_loss', patience=3, restore_best_weights=True)
+    # small_model.fit(X_train, Y_train, validation_data=(X_val,Y_val), epochs=10, callbacks=[early, checkpoint])
+
+    # Overfitting detection example (item 15)
+    train_loss = [0.8, 0.5, 0.3, 0.2]
+    val_loss   = [0.9, 0.6, 0.4, 0.5]
+    detect_overfitting(train_loss, val_loss)
+
+    # Softmax comparison (item 20)
+    logits = [2.0, 1.0, 0.1]
+    manual, tf_soft = compare_softmax(logits)
+    print("manual softmax:", manual)
+    print("tf softmax    :", tf_soft)
